@@ -16,6 +16,7 @@ from predictor import TrajectoryModel
 
 st.set_page_config(
     page_title="Depressive Symptom Trajectory Predictor",
+    page_icon="🧠",
     layout="centered",
 )
 
@@ -44,36 +45,57 @@ feature_names = [input_display_name(spec) for spec in model.inputs]
 
 
 st.title("Depressive Symptom Trajectory Predictor")
+st.caption(
+    "Research-use XGBoost model for estimating four 2011–2020 depressive-symptom "
+    "trajectory groups among older Chinese adults."
+)
+
+with st.expander("Model and variable definitions"):
+    st.markdown(
+        "- **ADL impairment:** difficulty in at least one of dressing, bathing, eating, "
+        "getting in or out of bed, toileting, or continence.\n"
+        "- **IADL impairment:** difficulty in at least one of housework, cooking, shopping, "
+        "taking medication, or managing money. The 2011 baseline definition excludes telephone use.\n"
+        "- The model uses **18 baseline predictors** selected by LASSO and returns internal-validation "
+        "research estimates rather than a clinical diagnosis."
+    )
 
 
 # Generate input fields
 inputs = {}
+st.subheader("Baseline characteristics")
+input_columns = st.columns(2)
 
-for spec in model.inputs:
+for input_index, spec in enumerate(model.inputs):
     name = spec["name"]
     label = input_display_name(spec)
+    container = input_columns[input_index % 2]
 
     if spec["type"] == "category":
         options = [item["value"] for item in spec["options"]]
         labels = category_display_labels(spec)
 
-        inputs[name] = st.selectbox(
-            label,
-            options=options,
-            index=options.index(str(spec["default"])),
-            format_func=lambda value, mapping=labels: mapping[str(value)],
-        )
+        with container:
+            inputs[name] = st.selectbox(
+                label,
+                options=options,
+                index=options.index(str(spec["default"])),
+                format_func=lambda value, mapping=labels: mapping[str(value)],
+                help=spec.get("help_en"),
+            )
 
     else:
         unit = UNITS.get(name, "")
         display_label = f"{label} ({unit})" if unit else label
 
-        inputs[name] = st.number_input(
-            display_label,
-            value=float(spec["default"]),
-            step=0.1,
-            format="%.2f",
-        )
+        with container:
+            inputs[name] = st.number_input(
+                display_label,
+                value=float(spec["default"]),
+                step=0.1,
+                format="%.2f",
+                help=spec.get("help_en"),
+            )
 
 
 # Convert SHAP inputs back to the original model inputs
@@ -129,11 +151,28 @@ def style_shap_force_plot(fig):
                 )
 
 
-if st.button("Predict"):
+if st.button("Predict trajectory group", type="primary", use_container_width=True):
     prediction = model.predict(inputs)
 
     predicted_group = group_names[prediction["class"]]
-    st.write("**Predicted trajectory group:**", predicted_group)
+    st.success("Predicted trajectory group: **{}**".format(predicted_group))
+    for warning in prediction["warnings"]:
+        st.warning(warning)
+
+    probability_table = pd.DataFrame({
+        "Trajectory group": [group_names[name] for name in prediction["classes"]],
+        "Probability (%)": [100 * value for value in prediction["probabilities"]],
+    })
+    st.dataframe(
+        probability_table,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Probability (%)": st.column_config.ProgressColumn(
+                "Predicted probability", min_value=0.0, max_value=100.0, format="%.1f%%"
+            )
+        },
+    )
 
     features = pd.DataFrame(
         [[float(inputs[name]) for name in variable_names]],
@@ -192,5 +231,11 @@ if st.button("Predict"):
         "Positive SHAP values increase the predicted-class score; "
         "negative values decrease it."
     )
+
+st.divider()
+st.caption(
+    "For research use only. This internally validated model does not establish a diagnosis "
+    "and should not replace clinical assessment."
+)
 
 

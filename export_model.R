@@ -1,269 +1,325 @@
-# 在保留 rf_model 等对象的原 RStudio 会话运行；不重新拟合任何模型。
-# 默认导出位置为本网页项目的 artifacts 文件夹。
-invisible((function() {
-  app_dir <- getOption("trajectory_export_dir", ".")
-  # 输出会由Codex读取并上传；不需要重训，也不需要手工上传数据。
-  required <- c("rf_model", "encoder", "train_completed", "train_set",
-                "model_feature_cols", "feature_names")
-  absent <- required[!vapply(required, exists, logical(1), inherits = TRUE)]
-  if (length(absent)) stop("当前会话缺少：", paste(absent, collapse = "、"))
-  pkgs <- c("caret", "randomForest", "jsonlite")
-  absent_pkgs <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
-  if (length(absent_pkgs)) stop("请先运行 install.packages(c(",
-    paste(sprintf('"%s"', absent_pkgs), collapse = ", "), "))")
+# Export the final CHARLS XGBoost model to a portable, dependency-free website artifact.
+# This script does not refit the model and never exports IDs or respondent records.
 
-  rf <- if (inherits(rf_model, "train")) rf_model$finalModel else rf_model
-  if (!inherits(rf, "randomForest") || rf$type != "classification") {
-    stop("本导出器适用于当前 randomForest 四分类模型。")
-  }
-  if (inherits(rf_model, "train") && !is.null(rf_model$preProcess)) {
-    stop("RF 存在额外预处理，不能跳过；请先适配导出器。")
-  }
-  if (any(rf$forest$ncat != 1L)) stop("要求 RF 输入全部为数值编码特征。")
-  # 只清理编码器副本中未参与预测的响应变量元数据。
-  encoder <- encoder
-  if ("trajectory_group" %in% all.vars(stats::delete.response(encoder$terms))) {
-    stop("编码器的预测变量含结局，不适合当前导出流程。")
-  }
-  if (!is.null(encoder$lvls)) encoder$lvls[["trajectory_group"]] <- NULL
-  encoder$facVars <- setdiff(encoder$facVars, "trajectory_group")
-  classes <- as.character(rf$classes)
-  if (!setequal(classes, paste0("Class", 1:4))) stop("类别须为 Class1 到 Class4。")
-  rf_features <- rownames(rf$importance)
-  if (is.null(rf_features)) rf_features <- names(rf$forest$ncat)
-  if (length(rf_features) != length(feature_names) ||
-      !setequal(rf_features, feature_names)) stop("模型特征与 feature_names 不一致。")
-  encoded_cols <- model_feature_cols[match(rf_features, feature_names)]
-  predictors <- setdiff(names(train_completed), "trajectory_group")
-  origin_of <- function(col) {
-    hits <- predictors[col == make.names(predictors) |
-      startsWith(col, paste0(make.names(predictors), "."))]
-    if (!length(hits)) stop("无法映射编码列：", col)
-    hits[which.max(nchar(make.names(hits)))]
-  }
-  origins <- vapply(encoded_cols, origin_of, character(1))
-  selected <- unique(unname(origins))
-  continuous <- c("age", "sleep", "systo", "diasto", "bmi")
-  labels <- c(gender="性别", marry="婚姻状况", edu="受教育程度", retire="退休状态",
-    systo="收缩压", diasto="舒张压", bmi="BMI", drinkl="饮酒", social="社会参与",
-    chronic="慢性疾病", hibpe="高血压", diabe="糖尿病", arther="关节炎",
-    disability="残疾状态", hear="听力", eyesight_close="近距离视力",
-    eyesight_distance="远距离视力", sleep="睡眠时间", satlife="生活满意度", age="年龄")
-  maps <- list(gender=c("1"="女","2"="男"), marry=c("1"="其他","2"="已婚"),
-    edu=c("1"="小学以下","2"="小学","3"="初中","4"="高中及以上"),
-    retire=c("1"="未退休","2"="已退休"), drinkl=c("1"="无","2"="有"),
-    social=c("1"="无","2"="有"), chronic=c("1"="无","2"="有"),
-    hibpe=c("1"="无","2"="有"), diabe=c("1"="无","2"="有"),
-    arther=c("1"="无","2"="有"), disability=c("1"="无","2"="有"),
-    hear=c("1"="良好","2"="一般","3"="较差"),
-    eyesight_close=c("1"="良好","2"="一般","3"="较差"),
-    eyesight_distance=c("1"="良好","2"="一般","3"="较差"),
-    satlife=c("1"="较差","2"="一般","3"="良好"))
-  units <- c(age="岁", sleep="小时/晚", systo="mmHg", diasto="mmHg", bmi="kg/m²")
-  if (any(!selected %in% names(labels))) stop("存在未配置的原始变量。")
+required_packages <- c("xgboost", "jsonlite")
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+if (length(missing_packages)) {
+  stop("Missing R packages: ", paste(missing_packages, collapse = ", "))
+}
 
-  # 参考资料由开发集的边际中位数/众数组成，不导出任何真实受试者记录。
-  reference <- train_completed[1, , drop = FALSE]
-  for (nm in predictors) {
-    x <- train_completed[[nm]]
-    if (is.factor(x)) {
-      counts <- table(x)
-      reference[[nm]] <- factor(names(counts)[which.max(counts)], levels=levels(x), ordered=is.ordered(x))
-    } else if (is.numeric(x)) reference[[nm]] <- stats::median(x, na.rm=TRUE)
-    else stop("未支持的预测变量类型：", nm)
-  }
-  encode <- function(d) {
-    x <- as.matrix(predict(encoder, newdata=d))
-    if (!all(encoded_cols %in% colnames(x))) stop("编码器输出缺少模型特征。")
-    x <- x[, encoded_cols, drop=FALSE]
-    colnames(x) <- rf_features
-    if (any(!is.finite(x))) stop("编码后有非有限数值。")
-    x
-  }
-  ref_x <- encode(reference)
-  input_specs <- lapply(selected, function(nm) {
-    spec <- list(name=nm, label=unname(labels[[nm]]))
-    if (nm %in% continuous) {
-      x <- train_completed[[nm]]
-      spec$type <- "number"
-      spec$unit <- unname(units[[nm]])
-      spec$default <- as.numeric(reference[[nm]])
-      spec$observed_min <- min(x, na.rm=TRUE)
-      spec$observed_max <- max(x, na.rm=TRUE)
-    } else {
-      lev <- levels(train_completed[[nm]])
-      mapping <- maps[[nm]]
-      if (is.null(mapping) || any(!lev %in% names(mapping))) stop(nm, " 的编码与赋值表不一致。")
-      spec$type <- "category"
-      spec$default <- as.character(reference[[nm]])
-      spec$options <- lapply(lev, function(code) list(value=code, label=unname(mapping[[code]])))
-    }
-    spec
-  })
-  feature_specs <- lapply(seq_along(rf_features), function(j) {
-    nm <- origins[[j]]
-    spec <- list(name=rf_features[[j]], original=nm)
-    if (nm %in% continuous) {
-      trial <- reference
-      trial[[nm]] <- reference[[nm]] + 1
-      if (abs(ref_x[1,j] - as.numeric(reference[[nm]])) > 1e-10 ||
-          abs(encode(trial)[1,j] - as.numeric(trial[[nm]])) > 1e-10) {
-        stop("连续特征并非恒等编码：", rf_features[[j]])
-      }
-      spec$type <- "number"
-    } else {
-      lev <- levels(train_completed[[nm]])
-      values <- vapply(lev, function(code) {
-        trial <- reference
-        trial[[nm]] <- factor(code, levels=lev)
-        as.numeric(encode(trial)[1,j])
-      }, numeric(1))
-      spec$type <- "category"
-      spec$values <- as.list(setNames(values, lev))
-    }
-    spec
-  })
-  portable_encode <- function(d) {
-    x <- matrix(NA_real_, nrow=nrow(d), ncol=length(feature_specs), dimnames=list(NULL, rf_features))
-    for (j in seq_along(feature_specs)) {
-      spec <- feature_specs[[j]]
-      if (spec$type == "number") x[,j] <- as.numeric(d[[spec$original]])
-      else x[,j] <- unlist(spec$values[as.character(d[[spec$original]])], use.names=FALSE)
-    }
-    if (any(!is.finite(x))) stop("便携编码产生缺失或无穷值。")
-    x
-  }
-  # 对整个已完成插补的开发集核对转换，避免仅核对一条参考资料。
-  expected_x <- encode(train_completed)
-  mapped_x <- portable_encode(train_completed)
-  if (max(abs(expected_x - mapped_x)) > 1e-10) stop("便携编码与原编码器不一致。")
-  if (nrow(train_set) != nrow(expected_x) ||
-      max(abs(as.matrix(train_set[,rf_features,drop=FALSE]) - expected_x)) > 1e-10) {
-    stop("train_set 与编码后的原始开发集不一致，不能导出。")
-  }
+project_dir <- normalizePath(getwd(), winslash = "/", mustWork = TRUE)
+source_dir <- getOption(
+  "trajectory_export_source_dir",
+  Sys.getenv("TRAJECTORY_EXPORT_SOURCE_DIR", file.path(project_dir, "..", "model-export-source"))
+)
+source_dir <- normalizePath(source_dir, winslash = "/", mustWork = TRUE)
 
-  trees <- lapply(seq_len(rf$ntree), function(i) unname(randomForest::getTree(rf, k=i, labelVar=FALSE)))
-  portable_prob <- function(x) {
-    votes <- matrix(0, nrow(x), length(classes), dimnames=list(NULL, classes))
-    for (tree in trees) {
-      for (i in seq_len(nrow(x))) {
-        node <- 1L
-        while (tree[node,5] != -1L) {
-          node <- as.integer(if (x[i,tree[node,3]] <= tree[node,4]) tree[node,1] else tree[node,2])
-          if (node < 1L || node > nrow(tree)) stop("树节点索引无效。")
-        }
-        k <- as.integer(tree[node,6])
-        votes[i,k] <- votes[i,k] + 1
-      }
-    }
-    votes / length(trees)
+# Copy these four unchanged analysis outputs to an ASCII-only path when the
+# local R runtime cannot read Chinese paths. They are read-only export inputs.
+model_file <- file.path(source_dir, "models_results.rds")
+preprocess_file <- file.path(source_dir, "preprocessing.rds")
+train_file <- file.path(source_dir, "train_baseline.csv")
+metrics_file <- file.path(source_dir, "model_metrics.csv")
+
+for (path in c(model_file, preprocess_file, train_file, metrics_file)) {
+  if (!file.exists(path)) stop("Required source file is missing: ", path)
+}
+
+model_bundle <- readRDS(model_file)
+preprocess <- readRDS(preprocess_file)$full
+fit <- model_bundle$models$XGBoost
+if (!inherits(fit, "xgb.Booster")) stop("The final XGBoost model was not found.")
+
+selected <- preprocess$selected
+feature_names <- colnames(preprocess$original)
+classes <- paste0("Class", 1:4)
+continuous <- intersect(c("hchild", "bmi", "sleep", "age", "total_cognition"), selected)
+categorical <- setdiff(selected, continuous)
+
+train <- read.csv(train_file, check.names = FALSE, stringsAsFactors = FALSE)
+if (!all(selected %in% names(train))) stop("The baseline training file lacks selected inputs.")
+
+fill <- unlist(preprocess$fill[selected], use.names = TRUE)
+levels_map <- lapply(train[categorical], function(x) sort(unique(x[!is.na(x)])))
+for (name in selected) train[[name]][is.na(train[[name]])] <- fill[[name]]
+
+encode <- function(data) {
+  data <- data[selected]
+  for (name in categorical) {
+    data[[name]] <- factor(data[[name]], levels = levels_map[[name]])
   }
-  # 人工构造的核对样本覆盖每一分类水平及连续变量的范围端点。
-  cases <- list(reference)
-  for (spec in input_specs) {
-    nm <- spec$name
-    values <- if (spec$type == "number") unique(c(spec$observed_min,spec$default,spec$observed_max)) else
-      vapply(spec$options, function(z) z$value, character(1))
-    for (value in values) {
-      trial <- reference
-      if (spec$type == "number") trial[[nm]] <- as.numeric(value)
-      else trial[[nm]] <- factor(as.character(value), levels=levels(reference[[nm]]))
-      cases[[length(cases)+1L]] <- trial
-    }
+  matrix_data <- model.matrix(~ ., data = data)[, -1, drop = FALSE]
+  if (!identical(colnames(matrix_data), feature_names)) {
+    stop("Website encoding columns do not match the fitted model.")
   }
-  case_data <- do.call(rbind, cases)
-  real_prob <- as.matrix(predict(rf_model, newdata=as.data.frame(encode(case_data)), type="prob"))[,classes,drop=FALSE]
-  exported_prob <- portable_prob(encode(case_data))
-  max_error <- max(abs(real_prob - exported_prob))
-  if (!is.finite(max_error) || max_error > 1e-12) stop("树预测不一致，最大误差：", max_error)
-  # 树阈值两侧也作测试；避免分裂点的 < / <= 实现不一致。
-  boundary_x <- ref_x[rep(1L, 1L), , drop=FALSE]
-  for (tree in trees[seq_len(min(10L,length(trees)))]) {
-    nodes <- head(which(tree[,5] != -1L), 3L)
-    for (node in nodes) for (delta in c(-1e-8,0,1e-8)) {
-      z <- ref_x; z[1,tree[node,3]] <- tree[node,4] + delta
-      boundary_x <- rbind(boundary_x,z)
+  storage.mode(matrix_data) <- "double"
+  matrix_data
+}
+
+labels_zh <- c(
+  gender = "性别", rural = "居住地", srh = "自评健康", adlab_c = "ADL受损",
+  arthre = "关节炎", digeste = "胃病", retire = "是否退休",
+  satlife = "生活满意度", pain = "疼痛", sleep = "睡眠时间",
+  disability = "是否残疾", fall_down = "跌倒", eyesight_distance = "远视情况",
+  eyesight_close = "近视情况", hear = "听力", total_cognition = "认知能力",
+  pension = "是否有养老保险", iadl = "IADL受损"
+)
+labels_en <- c(
+  gender = "Gender", rural = "Residence", srh = "Self-rated health",
+  adlab_c = "ADL impairment", arthre = "Arthritis",
+  digeste = "Stomach or digestive disease", retire = "Retirement status",
+  satlife = "Life satisfaction", pain = "Pain", sleep = "Sleep duration",
+  disability = "Disability", fall_down = "History of falls",
+  eyesight_distance = "Distance vision", eyesight_close = "Near vision",
+  hear = "Hearing", total_cognition = "Total cognition score",
+  pension = "Pension insurance", iadl = "IADL impairment"
+)
+units <- c(sleep = "hours/night", total_cognition = "points")
+helps_en <- c(
+  adlab_c = "Impaired if any difficulty is reported in dressing, bathing, eating, getting in or out of bed, toileting, or continence.",
+  iadl = "Impaired if any difficulty is reported in housework, cooking, shopping, taking medication, or managing money. The 2011 baseline definition excludes telephone use.",
+  total_cognition = "Baseline total cognition score used in the final prediction model."
+)
+
+binary_labels <- list(
+  gender = c("0" = "Female", "1" = "Male"),
+  rural = c("0" = "Urban", "1" = "Rural"),
+  adlab_c = c("0" = "No impairment", "1" = "Impairment"),
+  arthre = c("0" = "No", "1" = "Yes"),
+  digeste = c("0" = "No", "1" = "Yes"),
+  retire = c("0" = "Not retired", "1" = "Retired"),
+  pain = c("0" = "No", "1" = "Yes"),
+  disability = c("0" = "No", "1" = "Yes"),
+  fall_down = c("0" = "No", "1" = "Yes"),
+  pension = c("0" = "No", "1" = "Yes"),
+  iadl = c("0" = "No impairment", "1" = "Impairment")
+)
+ordinal_labels <- list(
+  srh = c("1" = "Very poor", "2" = "Poor", "3" = "Fair", "4" = "Good", "5" = "Very good"),
+  satlife = c("1" = "Not at all satisfied", "2" = "Not very satisfied",
+              "3" = "Somewhat satisfied", "4" = "Very satisfied", "5" = "Completely satisfied"),
+  eyesight_distance = c("1" = "Poor", "2" = "Fair", "3" = "Good", "4" = "Very good", "5" = "Excellent"),
+  eyesight_close = c("1" = "Poor", "2" = "Fair", "3" = "Good", "4" = "Very good", "5" = "Excellent"),
+  hear = c("1" = "Poor", "2" = "Fair", "3" = "Good", "4" = "Very good", "5" = "Excellent")
+)
+category_labels <- c(binary_labels, ordinal_labels)
+
+reference <- as.data.frame(as.list(fill[selected]), check.names = FALSE)
+for (name in selected) reference[[name]] <- as.numeric(reference[[name]])
+reference_x <- encode(reference)
+
+input_specs <- lapply(selected, function(name) {
+  spec <- list(
+    name = name,
+    label = unname(labels_zh[[name]]),
+    label_en = unname(labels_en[[name]]),
+    default = as.numeric(fill[[name]])
+  )
+  if (name %in% continuous) {
+    values <- train[[name]]
+    spec$type <- "number"
+    spec$unit <- unname(units[[name]])
+    spec$observed_min <- min(values, na.rm = TRUE)
+    spec$observed_max <- max(values, na.rm = TRUE)
+  } else {
+    spec$type <- "category"
+    mapping <- category_labels[[name]]
+    codes <- as.character(levels_map[[name]])
+    if (is.null(mapping) || !all(codes %in% names(mapping))) {
+      stop("Missing category labels for ", name)
     }
-  }
-  boundary_error <- max(abs(portable_prob(boundary_x) -
-    as.matrix(predict(rf_model,newdata=as.data.frame(boundary_x),type="prob"))[,classes,drop=FALSE]))
-  if (!is.finite(boundary_error) || boundary_error > 1e-12) stop("树分裂边界核对失败。")
-  verification_cases <- lapply(seq_len(nrow(case_data)), function(i) {
-    raw_input <- lapply(selected, function(nm) {
-      if (nm %in% continuous) as.numeric(case_data[[nm]][i]) else as.character(case_data[[nm]][i])
+    spec$default <- as.character(fill[[name]])
+    spec$options <- lapply(codes, function(code) {
+      list(value = code, label_en = unname(mapping[[code]]))
     })
-    names(raw_input) <- selected
-    list(inputs=raw_input, encoded=as.list(unname(encode(case_data[i,,drop=FALSE])[1,])),
-         probabilities=as.list(unname(real_prob[i,])))
-  })
+  }
+  if (name %in% names(helps_en)) spec$help_en <- unname(helps_en[[name]])
+  spec
+})
 
-  metrics <- list()
-  if (exists("metrics_summary_fixed", inherits=TRUE)) {
-    mm <- metrics_summary_fixed
-    metrics <- lapply(seq_len(nrow(mm)), function(i) as.list(mm[i,,drop=FALSE]))
+origin_of <- function(feature) {
+  hits <- selected[feature == selected | startsWith(feature, selected)]
+  if (!length(hits)) stop("Cannot map encoded feature: ", feature)
+  hits[[which.max(nchar(hits))]]
+}
+origins <- vapply(feature_names, origin_of, character(1))
+feature_specs <- lapply(seq_along(feature_names), function(index) {
+  feature <- feature_names[[index]]
+  original <- origins[[index]]
+  spec <- list(name = feature, original = original)
+  if (original %in% continuous) {
+    spec$type <- "number"
+  } else {
+    codes <- as.character(levels_map[[original]])
+    values <- vapply(codes, function(code) {
+      trial <- reference
+      trial[[original]] <- as.numeric(code)
+      as.numeric(encode(trial)[1, index])
+    }, numeric(1))
+    spec$type <- "category"
+    spec$values <- as.list(setNames(values, codes))
   }
-  trajectories <- list()
-  if (exists("df_long_dev", inherits=TRUE) && exists("m4_lcgm", inherits=TRUE)) {
-    dd <- as.data.frame(df_long_dev)
-    pp <- m4_lcgm$pprob
-    dd$class <- pp$class[match(dd$id_num,pp$id_num)]
-    dd <- dd[!is.na(dd$class) & !is.na(dd$cesd10),,drop=FALSE]
-    means <- stats::aggregate(cesd10 ~ class + wave, data=dd, FUN=mean)
-    years <- c("1"=2011,"2"=2013,"3"=2015,"4"=2018,"5"=2020)
-    trajectories <- lapply(seq_len(nrow(means)), function(i) list(
-      class=paste0("Class",means$class[i]), year=unname(years[as.character(means$wave[i])]),
-      mean=means$cesd10[i]))
+  spec
+})
+
+# Parse the text dump so Python inference does not need an R or XGBoost runtime.
+tree_text <- xgboost::xgb.dump(fit, dump_format = "json")
+trees <- if (length(tree_text) == 1L) {
+  jsonlite::fromJSON(tree_text[[1]], simplifyVector = FALSE)
+} else {
+  lapply(tree_text, function(text) jsonlite::fromJSON(text, simplifyVector = FALSE)[[1]])
+}
+if (length(trees) != 800L) stop("Expected 800 trees (200 rounds x 4 classes).")
+
+tree_leaf <- function(node, row) {
+  if (!is.null(node$leaf)) return(as.numeric(node$leaf))
+  value <- row[[match(node$split, feature_names)]]
+  target <- if (value < as.numeric(node$split_condition)) node$yes else node$no
+  child_ids <- vapply(node$children, function(child) as.integer(child$nodeid), integer(1))
+  child <- node$children[[match(as.integer(target), child_ids)]]
+  tree_leaf(child, row)
+}
+
+tree_margins <- function(x) {
+  margins <- matrix(0, nrow(x), 4L)
+  for (tree_index in seq_along(trees)) {
+    class_index <- ((tree_index - 1L) %% 4L) + 1L
+    margins[, class_index] <- margins[, class_index] +
+      apply(x, 1, function(row) tree_leaf(trees[[tree_index]], row))
   }
-  model <- list(format="charls-rf-v1", model_type="randomForest classification",
-    created_at=format(Sys.time(),tz="UTC",usetz=TRUE),
-    classes=as.list(classes),
-    class_labels=as.list(stats::setNames(paste("Class", sub("Class", "", classes)), classes)),
-    inputs=input_specs, features=feature_specs,
-    trees=trees, n_trees=length(trees), tie_method="first",
-    training=list(
-      mtry=rf$mtry,
-      nodesize=if (!is.null(rf$call$nodesize)) paste(deparse(rf$call$nodesize),collapse=" ") else NULL,
-      maxnodes=if (!is.null(rf$call$maxnodes)) paste(deparse(rf$call$maxnodes),collapse=" ") else NULL,
-      bestTune=if (inherits(rf_model,"train")) as.list(rf_model$bestTune[1,,drop=FALSE]) else NULL
-    ),
-    development_n=nrow(train_set),
-    validation_n=if (exists("test_set",inherits=TRUE)) nrow(test_set) else NULL,
-    development_class_counts=as.list(table(train_set$trajectory_group)),
-    validation_class_counts=if (exists("test_set",inherits=TRUE)) as.list(table(test_set$trajectory_group)) else NULL,
-    metrics=metrics, trajectories=trajectories,
-    verification_cases=verification_cases,
-    parity=list(case_count=nrow(case_data), max_probability_error=max_error,
-                boundary_case_count=nrow(boundary_x), boundary_probability_error=boundary_error,
-                full_development_encoding_rows=nrow(mapped_x)),
-    notes=list(probability="未校准的随机森林投票比例；最终拟合使用开发集上采样。",
-      missing="网页要求所有入选变量完整输入，不在新受试者上重新运行MICE。",
-      validation="随机划分内部验证；模型结果仅供研究。"))
-  if (exists("web_class_labels", inherits=TRUE)) {
-    labels_verified <- get("web_class_labels", inherits=TRUE)
-    if (!all(classes %in% names(labels_verified)) || anyNA(labels_verified[classes])) {
-      stop("web_class_labels必须按Class1至Class4命名，且不能有缺失值。")
-    }
-    model$class_labels <- as.list(as.character(labels_verified[classes]))
-    names(model$class_labels) <- classes
+  margins
+}
+
+# Synthetic verification profiles cover every category and both numeric ranges.
+case_rows <- list(reference)
+for (spec in input_specs) {
+  name <- spec$name
+  values <- if (spec$type == "category") {
+    vapply(spec$options, function(option) as.numeric(option$value), numeric(1))
+  } else {
+    unique(c(spec$observed_min, spec$default, spec$observed_max))
   }
-  dest <- file.path(app_dir,"artifacts")
-  dir.create(dest,recursive=TRUE,showWarnings=FALSE)
-  path <- file.path(dest,"model.json.gz")
-  con <- gzfile(path,open="wb")
-  tryCatch(jsonlite::write_json(model,con,auto_unbox=TRUE,digits=NA,na="null",
-                               null="null",matrix="rowmajor",pretty=FALSE),finally=close(con))
-  # 用R重新读取导出结果，检查最关键字段未在序列化时改变结构。
-  con <- gzfile(path,open="rb")
-  reloaded <- tryCatch(jsonlite::fromJSON(con,simplifyVector=FALSE),finally=close(con))
-  if (length(reloaded$trees) != rf$ntree || length(reloaded$classes) != 4L) stop("导出结构核对失败。")
-  summary_path <- file.path(app_dir,"export_summary.json")
-  jsonlite::write_json(list(created_at=model$created_at, training=model$training,
-    development_n=model$development_n, validation_n=model$validation_n,
-    inputs=selected, n_trees=rf$ntree, parity=model$parity),
-    summary_path,auto_unbox=TRUE,digits=NA,pretty=TRUE,null="null")
-  cat("\n真实随机森林模型已导出：\n",normalizePath(path,winslash="/"),"\n",
-      "原始输入变量数：",length(input_specs),"；编码特征数：",length(feature_specs),
-      "；树数：",rf$ntree,"\n",
-      "人工合成样本及阈值边界的最大预测误差：",max(max_error,boundary_error),"\n",
-      "未重新训练；未导出受试者ID或逐人记录。\n",sep="")
-})())
+  for (value in values) {
+    trial <- reference
+    trial[[name]] <- value
+    case_rows[[length(case_rows) + 1L]] <- trial
+  }
+}
+cases <- do.call(rbind, case_rows)
+case_x <- encode(cases)
+dmatrix <- xgboost::xgb.DMatrix(case_x)
+native_probability <- predict(fit, dmatrix)
+if (!is.matrix(native_probability)) native_probability <- matrix(native_probability, ncol = 4L, byrow = TRUE)
+native_margin <- predict(fit, dmatrix, outputmargin = TRUE)
+if (!is.matrix(native_margin)) native_margin <- matrix(native_margin, ncol = 4L, byrow = TRUE)
+
+leaf_margin <- tree_margins(case_x)
+base_matrix <- native_margin - leaf_margin
+base_margin <- colMeans(base_matrix)
+base_error <- max(abs(sweep(base_matrix, 2, base_margin, "-")))
+if (!is.finite(base_error) || base_error > 1e-6) stop("XGBoost base-margin recovery failed.")
+
+portable_margin <- sweep(leaf_margin, 2, base_margin, "+")
+portable_probability <- t(apply(portable_margin, 1, function(row) {
+  values <- exp(row - max(row))
+  values / sum(values)
+}))
+max_probability_error <- max(abs(native_probability - portable_probability))
+if (!is.finite(max_probability_error) || max_probability_error > 1e-6) {
+  stop("Portable XGBoost probabilities do not match R. Max error: ", max_probability_error)
+}
+
+verification_cases <- lapply(seq_len(nrow(cases)), function(index) {
+  raw <- lapply(selected, function(name) {
+    if (name %in% continuous) as.numeric(cases[[name]][index]) else as.character(cases[[name]][index])
+  })
+  names(raw) <- selected
+  list(
+    inputs = raw,
+    encoded = as.list(unname(case_x[index, ])),
+    probabilities = as.list(unname(native_probability[index, ]))
+  )
+})
+
+metrics <- read.csv(metrics_file, check.names = FALSE, stringsAsFactors = FALSE)
+metrics <- metrics[metrics$model == "XGBoost" & metrics$dataset %in% c("train", "test"), ]
+
+artifact <- list(
+  format = "charls-xgboost-v1",
+  model_type = "XGBoost multiclass classifier",
+  created_at = format(Sys.time(), tz = "UTC", usetz = TRUE),
+  classes = as.list(classes),
+  class_labels = as.list(setNames(c(
+    "G1: Persistent low depressive symptoms",
+    "G2: Increasing depressive symptoms",
+    "G3: Decreasing-then-increasing depressive symptoms",
+    "G4: Persistent high depressive symptoms"
+  ), classes)),
+  inputs = input_specs,
+  features = feature_specs,
+  base_margin = as.list(unname(base_margin)),
+  trees = trees,
+  n_trees = length(trees),
+  trees_per_class = length(trees) / 4L,
+  training = list(
+    max_depth = 3L, min_child_weight = 20, lambda = 10, alpha = 1,
+    eta = 0.03, nrounds = 200L, subsample = 0.7,
+    colsample_bytree = 0.7, gamma = 0.1, class_weight_power = 0.5
+  ),
+  development_n = nrow(preprocess$original),
+  validation_n = nrow(preprocess$validation),
+  metrics = lapply(seq_len(nrow(metrics)), function(index) as.list(metrics[index, , drop = FALSE])),
+  verification_cases = verification_cases,
+  parity = list(
+    case_count = nrow(cases),
+    base_margin_error = base_error,
+    max_probability_error = max_probability_error,
+    full_development_encoding_rows = nrow(preprocess$original)
+  ),
+  notes = list(
+    predictor_count = length(selected),
+    missing = "Website inputs are complete; training-set medians and modes are shown as defaults.",
+    adl = "Binary: any difficulty in one of six ADL activities is impairment.",
+    iadl = "Binary: any difficulty in one of five baseline IADL activities is impairment; telephone use is excluded.",
+    validation = "Random 70:30 internal validation; research use only."
+  )
+)
+
+dir.create(file.path(project_dir, "artifacts"), recursive = TRUE, showWarnings = FALSE)
+artifact_path <- file.path(project_dir, "artifacts", "model.json.gz")
+connection <- gzfile(artifact_path, open = "wb")
+tryCatch(
+  jsonlite::write_json(
+    artifact, connection, auto_unbox = TRUE, digits = NA,
+    na = "null", null = "null", matrix = "rowmajor"
+  ),
+  finally = close(connection)
+)
+
+summary <- list(
+  format = artifact$format,
+  created_at = artifact$created_at,
+  model_type = artifact$model_type,
+  inputs = as.list(selected),
+  encoded_feature_count = length(feature_names),
+  n_trees = length(trees),
+  development_n = artifact$development_n,
+  validation_n = artifact$validation_n,
+  training = artifact$training,
+  parity = artifact$parity,
+  class_labels = artifact$class_labels,
+  metrics = artifact$metrics,
+  definitions = list(adl = artifact$notes$adl, iadl = artifact$notes$iadl)
+)
+jsonlite::write_json(
+  summary, file.path(project_dir, "model_info.json"),
+  auto_unbox = TRUE, digits = NA, pretty = TRUE, null = "null"
+)
+
+cat("Exported final XGBoost website model:\n", normalizePath(artifact_path, winslash = "/"), "\n", sep = "")
+cat("Raw inputs:", length(selected), " Encoded features:", length(feature_names),
+    " Trees:", length(trees), "\n")
+cat("Verification profiles:", nrow(cases),
+    " Max probability error:", format(max_probability_error, scientific = TRUE), "\n")

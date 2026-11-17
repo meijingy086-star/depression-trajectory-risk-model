@@ -1,4 +1,4 @@
-"""Inference for the existing R randomForest; no retraining or R runtime needed."""
+"""Portable inference for the final R XGBoost model; no R runtime is needed."""
 import gzip
 import hashlib
 import json
@@ -19,10 +19,6 @@ def finite_number(value):
         return False
 
 
-def _integer(value):
-    return finite_number(value) and int(value) == float(value)
-
-
 class TrajectoryModel:
     def __init__(self, data, digest=""):
         self.data = data
@@ -31,7 +27,9 @@ class TrajectoryModel:
         self.classes = data["classes"]
         self.inputs = data["inputs"]
         self.features = data["features"]
+        self.feature_index = {item["name"]: index for index, item in enumerate(self.features)}
         self.trees = data["trees"]
+        self.base_margin = [float(value) for value in data["base_margin"]]
 
     @classmethod
     def load(cls, path):
@@ -44,147 +42,170 @@ class TrajectoryModel:
         model.verify_export()
         return model
 
+    def _validate_tree(self, node, feature_names, seen):
+        if not isinstance(node, dict) or "nodeid" not in node:
+            raise ModelError("XGBoost tree node is invalid.")
+        node_id = int(node["nodeid"])
+        if node_id in seen:
+            raise ModelError("XGBoost tree contains duplicate or cyclic nodes.")
+        seen.add(node_id)
+        if "leaf" in node:
+            if not finite_number(node["leaf"]):
+                raise ModelError("XGBoost leaf value is invalid.")
+            return
+        if node.get("split") not in feature_names or not finite_number(node.get("split_condition")):
+            raise ModelError("XGBoost split definition is invalid.")
+        children = node.get("children")
+        if not isinstance(children, list) or not children:
+            raise ModelError("XGBoost split node has no children.")
+        child_ids = {int(child.get("nodeid", -1)) for child in children}
+        if int(node.get("yes", -1)) not in child_ids or int(node.get("no", -1)) not in child_ids:
+            raise ModelError("XGBoost branch points to an unknown child.")
+        for child in children:
+            self._validate_tree(child, feature_names, seen)
+
     def _validate(self):
-        d = self.data
-        if d.get("format") != "charls-rf-v1":
-            raise ModelError("不支持的模型格式。请重新运行随附的 R 导出脚本。")
-        classes = d.get("classes", [])
-        if not isinstance(classes, list) or set(classes) != set("Class" + str(i) for i in range(1, 5)) or len(classes) != 4:
-            raise ModelError("模型必须包含四个唯一的轨迹类别。")
-        specs = d.get("inputs", [])
-        features = d.get("features", [])
-        trees = d.get("trees", [])
+        data = self.data
+        if data.get("format") != "charls-xgboost-v1":
+            raise ModelError("Unsupported model format. Re-run export_model.R.")
+        classes = data.get("classes", [])
+        if classes != ["Class1", "Class2", "Class3", "Class4"]:
+            raise ModelError("The model must contain Class1 through Class4 in order.")
+        specs = data.get("inputs", [])
+        features = data.get("features", [])
+        trees = data.get("trees", [])
         if not specs or not features or not trees:
-            raise ModelError("模型输入定义、特征或决策树为空。")
-        names = [s.get("name") for s in specs]
-        if len(set(names)) != len(names) or any(not n for n in names):
-            raise ModelError("原始输入变量名重复或为空。")
-        spec_map = dict((s["name"], s) for s in specs)
-        for s in specs:
-            if s.get("type") not in ("number", "category"):
-                raise ModelError("不支持的输入类型。")
-            if s["type"] == "category":
-                options = s.get("options", [])
-                codes = [o.get("value") for o in options]
-                if not codes or len(set(codes)) != len(codes) or any(not isinstance(c, str) for c in codes):
-                    raise ModelError("分类水平配置无效。")
-        feature_names = [f.get("name") for f in features]
+            raise ModelError("Model inputs, encoded features, or trees are empty.")
+        if data.get("n_trees") != len(trees) or len(trees) % len(classes):
+            raise ModelError("The multiclass tree count is inconsistent.")
+        if data.get("trees_per_class") != len(trees) // len(classes):
+            raise ModelError("The trees-per-class metadata is inconsistent.")
+        base_margin = data.get("base_margin", [])
+        if len(base_margin) != len(classes) or not all(finite_number(value) for value in base_margin):
+            raise ModelError("The XGBoost base margin is invalid.")
+
+        names = [spec.get("name") for spec in specs]
+        if len(set(names)) != len(names) or any(not name for name in names):
+            raise ModelError("Raw input names are duplicated or empty.")
+        spec_map = {spec["name"]: spec for spec in specs}
+        for spec in specs:
+            if spec.get("type") not in ("number", "category"):
+                raise ModelError("Unsupported raw input type.")
+            if spec["type"] == "category":
+                options = spec.get("options", [])
+                codes = [option.get("value") for option in options]
+                if not codes or len(set(codes)) != len(codes) or any(not isinstance(code, str) for code in codes):
+                    raise ModelError("Category options are invalid.")
+
+        feature_names = [feature.get("name") for feature in features]
         if len(set(feature_names)) != len(feature_names):
-            raise ModelError("编码特征名重复。")
-        for f in features:
-            if f.get("original") not in spec_map:
-                raise ModelError("编码特征缺少原始变量。")
-            s = spec_map[f["original"]]
-            if f.get("type") != s["type"]:
-                raise ModelError("原始变量与编码特征的类型不一致。")
-            if f["type"] == "category":
-                values = f.get("values", {})
-                if set(values) != set(o["value"] for o in s["options"]) or not all(finite_number(v) for v in values.values()):
-                    raise ModelError("分类编码规则不完整。")
-        if d.get("n_trees") != len(trees):
-            raise ModelError("决策树数量与元数据不一致。")
+            raise ModelError("Encoded feature names are duplicated.")
+        for feature in features:
+            original = feature.get("original")
+            if original not in spec_map or feature.get("type") != spec_map[original]["type"]:
+                raise ModelError("Encoded feature is not linked to a compatible raw input.")
+            if feature["type"] == "category":
+                values = feature.get("values", {})
+                expected = {option["value"] for option in spec_map[original]["options"]}
+                if set(values) != expected or not all(finite_number(value) for value in values.values()):
+                    raise ModelError("Category encoding is incomplete.")
         for tree in trees:
-            if not isinstance(tree, list) or not tree:
-                raise ModelError("决策树为空。")
-            for row in tree:
-                if not isinstance(row, list) or len(row) != 6 or not all(finite_number(v) for v in row):
-                    raise ModelError("决策树节点格式错误。")
-                if not all(_integer(row[i]) for i in (0, 1, 2, 4, 5)):
-                    raise ModelError("决策树节点索引必须为整数。")
-                status = int(row[4])
-                if status == -1:
-                    if not 1 <= int(row[5]) <= len(classes):
-                        raise ModelError("叶节点的类别编号无效。")
-                elif status == 1:
-                    if not 1 <= int(row[2]) <= len(features):
-                        raise ModelError("树分裂变量编号无效。")
-                    if not all(1 <= int(row[i]) <= len(tree) for i in (0, 1)):
-                        raise ModelError("树子节点编号无效。")
-                else:
-                    raise ModelError("决策树节点状态无效。")
-            # Reject cycles and shared children instead of risking an inference loop.
-            pending, visited = [1], set()
-            while pending:
-                node = pending.pop()
-                if node in visited:
-                    raise ModelError("决策树包含循环或重复子节点。")
-                visited.add(node)
-                row = tree[node - 1]
-                if int(row[4]) != -1:
-                    pending.extend([int(row[0]), int(row[1])])
+            self._validate_tree(tree, set(feature_names), set())
 
     def validate_inputs(self, raw):
         if not isinstance(raw, dict):
-            raise ModelError("输入必须为字段映射。")
+            raise ModelError("Inputs must be provided as a field mapping.")
         cleaned, warnings = {}, []
-        for s in self.inputs:
-            name, label = s["name"], s.get("label", s["name"])
+        for spec in self.inputs:
+            name = spec["name"]
+            label = spec.get("label_en") or spec.get("label", name)
             value = raw.get(name)
             if value is None or value == "":
-                raise ModelError("请填写：" + label)
-            if s["type"] == "category":
+                raise ModelError("Please complete: " + label)
+            if spec["type"] == "category":
                 if isinstance(value, bool):
-                    raise ModelError(label + "的类别无效。")
+                    raise ModelError(label + " has an invalid category.")
                 code = str(value)
-                if code not in [o["value"] for o in s["options"]]:
-                    raise ModelError(label + "的类别不在开发集编码范围内。")
+                if code not in [option["value"] for option in spec["options"]]:
+                    raise ModelError(label + " is outside the development-set coding range.")
                 cleaned[name] = code
             else:
                 if not finite_number(value):
-                    raise ModelError(label + "必须为有限数值。")
+                    raise ModelError(label + " must be a finite number.")
                 value = float(value)
                 cleaned[name] = value
-                lo, hi = s.get("observed_min"), s.get("observed_max")
-                if lo is not None and hi is not None and not float(lo) <= value <= float(hi):
-                    warnings.append("{0}超出开发集观测范围（{1:g}–{2:g} {3}），请核对输入，模型在此范围外的表现未知。".format(label, float(lo), float(hi), s.get("unit", "")))
+                low, high = spec.get("observed_min"), spec.get("observed_max")
+                if low is not None and high is not None and not float(low) <= value <= float(high):
+                    warnings.append(
+                        "{0} is outside the development-set range ({1:g}–{2:g} {3}). "
+                        "Please check the value; performance outside this range is unknown.".format(
+                            label, float(low), float(high), spec.get("unit", "")
+                        )
+                    )
         return cleaned, warnings
 
     def encode(self, raw):
         cleaned, warnings = self.validate_inputs(raw)
         vector = []
-        for f in self.features:
-            value = cleaned[f["original"]]
-            if f["type"] == "category":
-                value = f["values"][value]
+        for feature in self.features:
+            value = cleaned[feature["original"]]
+            if feature["type"] == "category":
+                value = feature["values"][value]
             vector.append(float(value))
         return vector, warnings
 
+    def _tree_value(self, tree, vector):
+        node = tree
+        while "leaf" not in node:
+            value = vector[self.feature_index[node["split"]]]
+            target = int(node["yes"] if value < float(node["split_condition"]) else node["no"])
+            children = {int(child["nodeid"]): child for child in node["children"]}
+            if target not in children:
+                raise ModelError("XGBoost traversal reached an unknown child.")
+            node = children[target]
+        return float(node["leaf"])
+
     def predict_encoded(self, vector):
-        if len(vector) != len(self.features) or not all(finite_number(v) for v in vector):
-            raise ModelError("编码后的特征长度或数值无效。")
-        votes = [0] * len(self.classes)
-        for tree in self.trees:
-            node = 1
-            for _ in range(len(tree) + 1):
-                row = tree[node - 1]
-                if int(row[4]) == -1:
-                    votes[int(row[5]) - 1] += 1
-                    break
-                feature = int(row[2]) - 1
-                node = int(row[0] if vector[feature] <= row[3] else row[1])
-            else:
-                raise ModelError("树预测未终止。")
-        return [v / float(len(self.trees)) for v in votes]
+        if len(vector) != len(self.features) or not all(finite_number(value) for value in vector):
+            raise ModelError("Encoded feature length or values are invalid.")
+        margins = list(self.base_margin)
+        class_count = len(self.classes)
+        for tree_index, tree in enumerate(self.trees):
+            margins[tree_index % class_count] += self._tree_value(tree, vector)
+        maximum = max(margins)
+        exponentials = [math.exp(value - maximum) for value in margins]
+        total = sum(exponentials)
+        return [value / total for value in exponentials]
 
     def predict(self, raw):
         vector, warnings = self.encode(raw)
         probabilities = self.predict_encoded(vector)
-        top_index = max(range(len(probabilities)), key=lambda i: probabilities[i])
-        return {"class": self.classes[top_index], "classes": list(self.classes),
-                "probabilities": probabilities, "warnings": warnings,
-                "tie": sum(abs(p - probabilities[top_index]) < 1e-12 for p in probabilities) > 1}
+        top_index = max(range(len(probabilities)), key=probabilities.__getitem__)
+        return {
+            "class": self.classes[top_index],
+            "classes": list(self.classes),
+            "probabilities": probabilities,
+            "warnings": warnings,
+            "tie": sum(abs(value - probabilities[top_index]) < 1e-12 for value in probabilities) > 1,
+        }
 
     def verify_export(self):
         cases = self.data.get("verification_cases", [])
         if not cases:
-            raise ModelError("模型缺少与原 R 预测进行对照的核对样本。")
+            raise ModelError("The model lacks R parity verification profiles.")
         for case in cases:
             vector, _ = self.encode(case["inputs"])
-            expected_x = case.get("encoded", [])
-            if len(expected_x) != len(vector) or any(abs(a - b) > 1e-10 for a, b in zip(vector, expected_x)):
-                raise ModelError("网页编码与 R 编码核对失败。")
-            got = self.predict_encoded(vector)
-            expected = case.get("probabilities", [])
-            if len(expected) != len(got) or any(abs(a - b) > 1e-12 for a, b in zip(got, expected)):
-                raise ModelError("网页预测与原 R 模型核对失败。")
+            expected_vector = case.get("encoded", [])
+            if len(expected_vector) != len(vector) or any(
+                abs(actual - expected) > 1e-10
+                for actual, expected in zip(vector, expected_vector)
+            ):
+                raise ModelError("Website encoding does not match the R encoding.")
+            actual_probability = self.predict_encoded(vector)
+            expected_probability = case.get("probabilities", [])
+            if len(expected_probability) != len(actual_probability) or any(
+                abs(actual - expected) > 1e-6
+                for actual, expected in zip(actual_probability, expected_probability)
+            ):
+                raise ModelError("Website prediction does not match the R XGBoost model.")
         return len(cases)

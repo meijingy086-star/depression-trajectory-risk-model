@@ -1,0 +1,8 @@
+*.py text eol=lf
+*.R text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.gz binary

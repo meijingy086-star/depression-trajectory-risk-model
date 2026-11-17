@@ -1,0 +1,21 @@
+name: Verify model website
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile Python sources
+        run: python -m py_compile app.py predictor.py presentation.py verify_model.py
+      - name: Run unit and artifact parity tests
+        run: python -m unittest discover -s tests -v
+      - name: Verify packaged model
+        run: python verify_model.py

@@ -1,12 +1,13 @@
-# Model verification, 22 October 2026
+# Model verification, 17 November 2026
 
-- Artifact SHA-256: `92ac184550783b012fc0de66b4a2c025661bf9d0779eab64c3d30d797d3380e7`.
-- Synthetic raw-input profiles checked against R: 39.
-- Maximum exported-profile probability error in R: 0.
-- Tree-threshold boundary profiles checked in R: 91.
-- Maximum boundary probability error in R: 0.
-- Development rows checked for equivalent feature encoding: 1,867.
-- Python `verify_model.py` loads and verifies every exported synthetic profile.
-- Tests cover tree traversal, threshold boundaries, encoding, class order, invalid inputs, and display-label handling.
+- Artifact SHA-256: `84853acdc870849bd5845aa7446fc9d486361a317fa6023441a4e01df5393718`.
+- Model: final XGBoost multiclass classifier from the updated 36-candidate-variable analysis.
+- Raw predictors: 18; encoded features: 33.
+- Trees: 800 (200 boosting rounds × 4 classes).
+- Synthetic raw-input profiles checked against R: 54.
+- Maximum portable probability error versus the original R model: `1.282928e-07`.
+- Development rows used to verify feature-column identity: 1,946.
+- Python `verify_model.py` loads the packaged artifact and rechecks every R parity profile.
+- Unit tests cover strict XGBoost split semantics, encoding, softmax probabilities, malformed trees, invalid inputs, display labels, artifact fingerprinting, and deployment assets.
 
-The actual tree contents are from the newly exported model, with `nodesize=25` and `maxnodes=30`. Display names were reviewed against the new exported group means and do not affect predictions. Streamlit rendering was not executed locally because its runtime dependencies are unavailable in this execution environment.
+The export is inference-only: it does not refit the model and does not include participant IDs or records. ADL and IADL definitions match the final analysis, and episodic memory and executive-function variables are not website inputs.

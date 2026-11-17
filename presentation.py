@@ -1,30 +1,31 @@
 """Display names for model-defined inputs and explicitly verified classes."""
 
 INPUT_LABELS = {
-    "age": "Age", "gender": "Gender", "marry": "Marital status",
-    "edu": "Education level", "retire": "Retirement status",
-    "systo": "Systolic blood pressure", "diasto": "Diastolic blood pressure",
-    "bmi": "BMI", "drinkl": "Alcohol consumption", "social": "Social participation",
-    "chronic": "Chronic disease", "hibpe": "Hypertension", "diabe": "Diabetes",
-    "arther": "Arthritis", "disability": "Disability", "hear": "Hearing",
+    "gender": "Gender", "rural": "Residence", "srh": "Self-rated health",
+    "adlab_c": "ADL impairment", "arthre": "Arthritis",
+    "digeste": "Stomach or digestive disease", "retire": "Retirement status",
+    "satlife": "Life satisfaction", "pain": "Pain", "sleep": "Sleep duration",
+    "disability": "Disability", "fall_down": "History of falls",
     "eyesight_close": "Near vision", "eyesight_distance": "Distance vision",
-    "sleep": "Sleep duration", "satlife": "Life satisfaction",
+    "hear": "Hearing", "total_cognition": "Total cognition score",
+    "pension": "Pension insurance", "iadl": "IADL impairment",
 }
 
 CATEGORY_LABELS = {
-    "gender": {"1": "Female", "2": "Male"},
-    "marry": {"1": "Other", "2": "Married"},
-    "edu": {"1": "Less than primary school", "2": "Primary school",
-            "3": "Middle school", "4": "High school or above"},
-    "retire": {"1": "Not retired", "2": "Retired"},
-    "hear": {"1": "Good", "2": "Fair", "3": "Poor"},
-    "eyesight_close": {"1": "Good", "2": "Fair", "3": "Poor"},
-    "eyesight_distance": {"1": "Good", "2": "Fair", "3": "Poor"},
-    "satlife": {"1": "Poor", "2": "Fair", "3": "Good"},
+    "gender": {"0": "Female", "1": "Male"},
+    "rural": {"0": "Urban", "1": "Rural"},
+    "srh": {"1": "Very poor", "2": "Poor", "3": "Fair", "4": "Good", "5": "Very good"},
+    "satlife": {"1": "Not at all satisfied", "2": "Not very satisfied",
+                "3": "Somewhat satisfied", "4": "Very satisfied", "5": "Completely satisfied"},
+    "hear": {"1": "Poor", "2": "Fair", "3": "Good", "4": "Very good", "5": "Excellent"},
+    "eyesight_close": {"1": "Poor", "2": "Fair", "3": "Good", "4": "Very good", "5": "Excellent"},
+    "eyesight_distance": {"1": "Poor", "2": "Fair", "3": "Good", "4": "Very good", "5": "Excellent"},
+    "adlab_c": {"0": "No impairment", "1": "Impairment"},
+    "iadl": {"0": "No impairment", "1": "Impairment"},
 }
-BINARY_VARIABLES = {"drinkl", "social", "chronic", "hibpe", "diabe", "arther", "disability"}
-UNITS = {"age": "years", "systo": "mmHg", "diasto": "mmHg",
-         "bmi": "kg/m²", "sleep": "hours/night"}
+BINARY_VARIABLES = {"arthre", "digeste", "retire", "pain", "disability",
+                    "fall_down", "pension"}
+UNITS = {"sleep": "hours/night", "total_cognition": "points"}
 
 
 def class_display_names(model_data, classes):

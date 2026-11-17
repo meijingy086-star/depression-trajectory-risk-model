@@ -19,7 +19,7 @@ class PresentationTests(unittest.TestCase):
 
     def test_new_three_level_input_is_supported(self):
         spec = {"name": "eyesight_distance", "options": [{"value": str(i)} for i in (1, 2, 3)]}
-        self.assertEqual(category_display_labels(spec)["3"], "Poor")
+        self.assertEqual(category_display_labels(spec)["3"], "Good")
 
     def test_unknown_code_uses_code_not_guessed_binary_meaning(self):
         spec = {"name": "new_factor", "options": [{"value": "3"}]}
@@ -30,7 +30,7 @@ class PresentationTests(unittest.TestCase):
         self.assertEqual(category_display_labels(spec)["1"], "Verified code one")
 
     def test_new_numeric_input_has_display_label(self):
-        self.assertEqual(input_display_name({"name": "diasto"}), "Diastolic blood pressure")
+        self.assertEqual(input_display_name({"name": "total_cognition"}), "Total cognition score")
 
 
 if __name__ == "__main__":
