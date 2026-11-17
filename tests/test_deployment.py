@@ -25,7 +25,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn("Research-use XGBoost model for estimating", source)
         self.assertNotIn("probability_table", source)
         self.assertNotIn("Reference: development-set medians and modes", source)
-        self.assertIn("range: {observed_min:g}–{observed_max:g}", source)
+        self.assertIn("range: 0–21", source)
         self.assertIn("ADL impairment: difficulty in at least one", source)
 
 

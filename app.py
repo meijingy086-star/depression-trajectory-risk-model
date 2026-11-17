@@ -75,14 +75,10 @@ for input_index, spec in enumerate(model.inputs):
         display_label = f"{label} ({unit})" if unit else label
         number_options = {}
         if name == "total_cognition":
-            observed_min = float(spec["observed_min"])
-            observed_max = float(spec["observed_max"])
-            display_label = (
-                f"{label} ({unit}; range: {observed_min:g}–{observed_max:g})"
-            )
+            display_label = f"{label} ({unit}; range: 0–21)"
             number_options = {
-                "min_value": observed_min,
-                "max_value": observed_max,
+                "min_value": 0.0,
+                "max_value": 21.0,
             }
 
         with container:
