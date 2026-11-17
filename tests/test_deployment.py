@@ -20,6 +20,14 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(len(model.trees), info["n_trees"])
         self.assertEqual(model.verify_export(), info["parity"]["case_count"])
 
+    def test_requested_compact_layout_is_packaged(self):
+        source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertNotIn("Research-use XGBoost model for estimating", source)
+        self.assertNotIn("probability_table", source)
+        self.assertNotIn("Reference: development-set medians and modes", source)
+        self.assertIn("range: {observed_min:g}–{observed_max:g}", source)
+        self.assertIn("ADL impairment: difficulty in at least one", source)
+
 
 if __name__ == "__main__":
     unittest.main()

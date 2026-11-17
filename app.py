@@ -45,20 +45,6 @@ feature_names = [input_display_name(spec) for spec in model.inputs]
 
 
 st.title("Depressive Symptom Trajectory Predictor")
-st.caption(
-    "Research-use XGBoost model for estimating four 2011–2020 depressive-symptom "
-    "trajectory groups among older Chinese adults."
-)
-
-with st.expander("Model and variable definitions"):
-    st.markdown(
-        "- **ADL impairment:** difficulty in at least one of dressing, bathing, eating, "
-        "getting in or out of bed, toileting, or continence.\n"
-        "- **IADL impairment:** difficulty in at least one of housework, cooking, shopping, "
-        "taking medication, or managing money. The 2011 baseline definition excludes telephone use.\n"
-        "- The model uses **18 baseline predictors** selected by LASSO and returns internal-validation "
-        "research estimates rather than a clinical diagnosis."
-    )
 
 
 # Generate input fields
@@ -87,6 +73,17 @@ for input_index, spec in enumerate(model.inputs):
     else:
         unit = UNITS.get(name, "")
         display_label = f"{label} ({unit})" if unit else label
+        number_options = {}
+        if name == "total_cognition":
+            observed_min = float(spec["observed_min"])
+            observed_max = float(spec["observed_max"])
+            display_label = (
+                f"{label} ({unit}; range: {observed_min:g}–{observed_max:g})"
+            )
+            number_options = {
+                "min_value": observed_min,
+                "max_value": observed_max,
+            }
 
         with container:
             inputs[name] = st.number_input(
@@ -95,6 +92,7 @@ for input_index, spec in enumerate(model.inputs):
                 step=0.1,
                 format="%.2f",
                 help=spec.get("help_en"),
+                **number_options,
             )
 
 
@@ -156,23 +154,6 @@ if st.button("Predict trajectory group", type="primary", use_container_width=Tru
 
     predicted_group = group_names[prediction["class"]]
     st.success("Predicted trajectory group: **{}**".format(predicted_group))
-    for warning in prediction["warnings"]:
-        st.warning(warning)
-
-    probability_table = pd.DataFrame({
-        "Trajectory group": [group_names[name] for name in prediction["classes"]],
-        "Probability (%)": [100 * value for value in prediction["probabilities"]],
-    })
-    st.dataframe(
-        probability_table,
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Probability (%)": st.column_config.ProgressColumn(
-                "Predicted probability", min_value=0.0, max_value=100.0, format="%.1f%%"
-            )
-        },
-    )
 
     features = pd.DataFrame(
         [[float(inputs[name]) for name in variable_names]],
@@ -226,16 +207,11 @@ if st.button("Predict trajectory group", type="primary", use_container_width=Tru
         st.pyplot(fig)
         plt.close(fig)
 
-    st.caption(
-        "Reference: development-set medians and modes. "
-        "Positive SHAP values increase the predicted-class score; "
-        "negative values decrease it."
-    )
-
-st.divider()
 st.caption(
-    "For research use only. This internally validated model does not establish a diagnosis "
-    "and should not replace clinical assessment."
+    "ADL impairment: difficulty in at least one of dressing, bathing, eating, getting in or "
+    "out of bed, toileting, or continence. IADL impairment: difficulty in at least one of "
+    "housework, cooking, shopping, taking medication, or managing money; the 2011 baseline "
+    "definition excludes telephone use."
 )
 
 
