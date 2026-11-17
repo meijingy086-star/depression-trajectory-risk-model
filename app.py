@@ -47,9 +47,71 @@ feature_names = [input_display_name(spec) for spec in model.inputs]
 st.title("Depressive Symptom Trajectory Predictor")
 
 
+def cognition_calculator():
+    with st.sidebar:
+        with st.expander("Cognition score calculator (0–21)"):
+            with st.form("cognition_assessment"):
+                st.markdown("**1. Immediate recall**")
+                st.write("Read these ten words aloud. Ask the participant to recall as many as possible in any order.")
+                st.caption("Vegetables, hat, train, land, river, table, apple, gift, sky, scissors")
+                immediate = st.number_input("Number of distinct words recalled correctly now", 0, 10, value=None)
+
+                st.markdown("**2. Time orientation**")
+                orientation = [
+                    st.selectbox(question, ("Correct", "Incorrect / Don't know"), index=None)
+                    for question in (
+                        "What year is it?", "What month is it?",
+                        "What is today's date (day of the month)?",
+                        "What day of the week is it?", "What season is it?",
+                    )
+                ]
+
+                st.markdown("**3. Serial sevens**")
+                st.write("Ask the participant to start at 100 and subtract 7 five times. Record each answer as given. Enter ? for a missed answer.")
+                responses = [st.text_input(f"Answer {i}") for i in range(1, 6)]
+
+                st.markdown("**4. Figure copying**")
+                st.write("Show the reference drawing of two intersecting pentagons and ask the participant to copy it.")
+                drawing = st.selectbox(
+                    "Did the participant draw two recognizable pentagons that intersect?",
+                    ("Yes", "No"), index=None,
+                )
+
+                st.markdown("**5. Delayed recall**")
+                st.write("After the intervening tasks (about 4–10 minutes), ask for the same words again without rereading the list.")
+                delayed = st.number_input("Number of distinct words recalled correctly after the delay", 0, 10, value=None)
+                calculate = st.form_submit_button("Calculate and use score")
+
+            if calculate:
+                if immediate is None or delayed is None or None in orientation or drawing is None:
+                    st.error("Complete both recall counts, all five orientation questions, and the drawing assessment.")
+                else:
+                    try:
+                        answers = [None if answer.strip() == "?" else int(answer) for answer in responses]
+                    except ValueError:
+                        st.error("Enter a whole number or ? for each serial subtraction answer.")
+                    else:
+                        memory = (immediate + delayed) / 2
+                        serial = sum(
+                            previous is not None and current == previous - 7
+                            for previous, current in zip([100] + answers[:-1], answers)
+                        )
+                        mental = orientation.count("Correct") + serial + (drawing == "Yes")
+                        total = memory + mental
+                        st.session_state["cognition_result"] = (memory, mental, total)
+                        st.session_state["total_cognition_input"] = total
+
+            if "cognition_result" in st.session_state:
+                memory, mental, total = st.session_state["cognition_result"]
+                st.success(f"Calculated total cognition score: {total:g} / 21")
+                st.caption(f"Episodic memory: {memory:g} / 10 · Mental intactness: {mental} / 11")
+
+
+cognition_calculator()
+
+
 # Generate input fields
 inputs = {}
-st.subheader("Baseline characteristics")
 input_columns = st.columns(2)
 
 for input_index, spec in enumerate(model.inputs):
@@ -74,17 +136,21 @@ for input_index, spec in enumerate(model.inputs):
         unit = UNITS.get(name, "")
         display_label = f"{label} ({unit})" if unit else label
         number_options = {}
+        default_value = float(spec["default"])
         if name == "total_cognition":
             display_label = f"{label} ({unit}; range: 0–21)"
+            st.session_state.setdefault("total_cognition_input", default_value)
+            default_value = None
             number_options = {
                 "min_value": 0.0,
                 "max_value": 21.0,
+                "key": "total_cognition_input",
             }
 
         with container:
             inputs[name] = st.number_input(
                 display_label,
-                value=float(spec["default"]),
+                value=default_value,
                 step=0.1,
                 format="%.2f",
                 help=spec.get("help_en"),
@@ -146,6 +212,9 @@ def style_shap_force_plot(fig):
 
 
 if st.button("Predict trajectory group", type="primary", use_container_width=True):
+    if inputs.get("total_cognition") is None:
+        st.error("Enter a total cognition score or calculate it in the sidebar.")
+        st.stop()
     prediction = model.predict(inputs)
 
     predicted_group = group_names[prediction["class"]]
